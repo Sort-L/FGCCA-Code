@@ -1,0 +1,220 @@
+--- 
+  title: "Characterization with FGCCA" 
+output: html_document
+--- 
+  
+  ### FGCCA : a use case
+  
+  We propose to apply FGCCA to a biological dataset containing sparse and irregular functional data. The dataset contains various biological measurements made on 312 subjects diagnosed with Primary Biliary Cirrhosis, a rare autoimmune disease. We propose to analyse only female individuals who received D-penicillamine during the first 2500 days. 
+
+``` {r}
+library(JM)
+
+outliers <- c(42)
+# Extracting data pbc2 from the JM package
+cols <- c("id", "years", "year", "status", "albumin", "serBilir", "prothrombin", "age", "sex", "drug")
+data <- subset(pbc2, status %in% c("dead", "alive") & !(id %in% outliers), cols)
+```
+
+We first perform normalization on the various measurements of interest. We considered 3 bio markers : Albumin, Bilirubin and Prothrombin time.
+
+```{r}
+library(dplyr)
+
+data <- data %>% mutate(id,
+                        time=years,
+                        "bilirubin"=log(serBilir), 
+                        "albumin"=albumin, 
+                        "prothrombin"=prothrombin, 
+                        .keep="unused")
+
+data <- data %>% dplyr::filter(year < 10)
+```
+
+We first visualize the observations with the first 10 trajectories.
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+data.lf <- data %>% pivot_longer(cols=c("bilirubin", "albumin", "prothrombin"))
+data.lf.first <- data.lf[data.lf$id %in% unique(data.lf$id)[1:5],]
+# Plotting observation points and the first 10 trajectories
+ggplot(data.lf, aes(x=year, y=value, group=id)) + geom_line(size=0.01) + geom_point(size=0.4) + facet_wrap(name~.,scale="free") + theme_bw(base_size = 15) + theme(axis.title.y = element_blank() , axis.text.y = element_blank(), axis.ticks.y = element_blank(), axis.title.x = element_blank())
+```
+
+```{r, echo=FALSE}
+names <- c("bilirubin", "albumin", "prothrombin")
+
+data.list <- data %>% group_by(id, drug) %>% mutate(Ly1=list(bilirubin),
+                                                    Ly2=list(albumin),
+                                                    Ly3=list(prothrombin),
+                                                    Lt=list(year), .keep="unused") %>% dplyr::filter(row_number(id)==1) %>% ungroup()
+
+```
+
+To apply FGCCA we must prepare the data. We also specify the various parameters of the analysis. We consider here a complete design, meaning that we will study the relationships for each process between all the others. We use bandwidths of 400 days.
+
+```{r}
+K <- 3
+J <- 4
+library(pracma)
+
+# Formatting the data
+Lts <- list(data.list$Lt, data.list$Lt, data.list$Lt, NULL)
+Lys <- list(data.list$Ly1, data.list$Ly2, data.list$Ly3, t(t(data.list$time)))
+
+# Specifying manually the bandwidths
+bws <- rep(1, J)
+grids <- lapply(1:J, function(x){seq(0, max(data$year), length.out=51)})
+
+C_null <- matrix(c(0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0,1, 1, 1, 1, 0), nrow=4)
+C_full <- 1 - diag(4)
+C_scores_null <-diag(4)
+C_scores_full <- matrix(c(1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1), nrow=4)
+```
+
+```{r}
+library(FGCCA)
+library(pracma)
+library(fdapace)
+
+K <- 2
+J <- 4
+gridSizes <- c(100, 100, 100, 100)
+N <- length(Lys[[1]])
+
+FPCAoptns <- list(list(nRegGrid=gridSizes[1]), 
+                  list(nRegGrid=gridSizes[2]), 
+                  list(nRegGrid=gridSizes[3]), 
+                  list(nRegGrid=gridSizes[3]))
+
+majority.pred.model = function(data.train, data.test) {
+  J <- length(data.train)
+  model <- lapply(seq(J), function(j){glm(y ~ X1, data=data.train[[j]], family=binomial)})
+  cors <- sapply(seq(J), function(j){drop(abs(cor(data.train[[j]]$X1, data.train[[j]]$y)))})
+  p.preds <- lapply(seq(J), function(j){predict.glm(model[[j]], newdata = data.test[[j]], type = "response")})
+  y.preds <- lapply(seq(J), function(j){round(p.preds[[j]])})
+  y.pred <- round(rowSums(sapply(seq(J), function(j){cors[j] / sum(cors) * as.vector(y.preds[[j]])})))
+  return(y.pred)
+}
+
+method.fpcr = function(Lys.train, Lts.train, y.train, Lys.test, Lts.test, y.test) {
+  J <- length(Lys.train) - 1
+  N.train <- length(Lys.train[[1]])
+  N.test <- length(Lys.test[[1]])
+  X.mats.train <- lapply(seq(J), function(j){matrix(unlist(Lys.train[[j]]), byrow=T, nrow=N.train)})
+  X.mats.test <- lapply(seq(J), function(j){matrix(unlist(Lys.test[[j]]), byrow=T, nrow=N.test)})
+  data.train <- lapply(seq(J), function(j){data.frame(y=y.train)})
+  for (j in seq(J)) {data.train[[j]]$X = X.mats.train[[j]]}
+  data.test <- lapply(seq(J), function(j){data.frame(y=y.test)})
+  for (j in seq(J)) {data.test[[j]]$X = X.mats.test[[j]]}
+  transform.model <- lapply(seq(J), function(j){pfr(y ~ lf(X), data=data.train[[j]], family=binomial)})
+  predictions <- lapply(seq(J), function(j){predict(transform.model[[j]], newdata=data.test[[j]], type="response")})
+  metrics <- confusionMatrix(table(pred=round(predictions[[1]]), true=y.test))
+  return(metrics$byClass["Balanced Accuracy"])
+}
+
+method.fpca = function(Lys.train, Lts.train, y.train, Lys.test, Lts.test, y.test) {
+  J <- length(Lys.train) - 1
+  transform.model <- lapply(seq(J), function(j){FPCA(Lys.train[[j]], Lts.train[[j]], 
+                                                     list(methodSelectK=K, nRegGrid=gridSizes[j]))})
+  data.transformed <- lapply(seq(J), function(j){predict(transform.model[[j]], Lys.test[[j]], Lts.test[[j]])})
+  data.train <- lapply(seq(J), function(j){data.frame(transform.model[[j]]$xiEst, y=y.train)})
+  data.test <- lapply(seq(J), function(j){data.frame(data.transformed[[j]]$scores, y=y.test)})
+  predictions <- majority.pred.model(data.train, data.test)
+  metrics <- confusionMatrix(table(pred=predictions, true=y.test))
+  return(metrics$byClass["Balanced Accuracy"])
+}
+
+method.fgcca = function(Lys.train, Lts.train, y.train, Lys.test, Lts.test, y.test) {
+  J <- length(Lys.train)
+  N <- length(Lys.test[[1]])
+  transform.model <- fgcca(Lys.train, Lts.train, connection=C_null, ncomp=c(rep(K, J-1), 1), deflType = "uncor", verbose=F,
+                           scale=T, optns = list(smoothing="lwls", scoreConnection=C_scores_null, scoreMethod=rep("IN", 4)))
+  Lys.test[1:(J-1)] <- lapply(seq(J-1), function(j){lapply(seq(N), function(i){
+    sqrt(transform.model$scaleValues[j]) * (Lys.test[[j]][[i]] - interp1(transform.model$grids[[j]], transform.model$mus[[j]], Lts.test[[j]][[i]]))
+    })})
+  Lts.test <- list(Lts.test[[1]], Lts.test[[2]], Lts.test[[3]], lapply(seq(N), function(i){as.double(1:1)}))
+  data.transformed <- CompScoreCE(Lys.test, Lts.test, transform.model$a, transform.model$sigmas, transform.model$grids,transform.model$megaCov,
+                                  transform.model$W, C_scores_null, transform.model$optns$useReg,transform.model$scaleValues)
+    # data.transformed <- lapply(seq_len(J-1), function(j){FGCCA:::CompScoreIN(Lys.test[[j]], Lts.test[[j]], transform.model$a[[j]], transform.model$grids[[j]], transform.model$scaleValues[j])})
+  data.train <- lapply(seq(J-1), function(j){data.frame(transform.model$Y[[j]], y=y.train)})
+  data.test <- lapply(seq(J-1), function(j){data.frame(data.transformed[[j]], y=y.test)})
+  predictions <- majority.pred.model(data.train, data.test)
+  metrics <- confusionMatrix(table(pred=predictions, true=y.test))
+  return(metrics$byClass["Balanced Accuracy"])
+}
+
+compare = function(Lys.train, Lts.train, y.train, Lys.test, Lts.test, y.test, methods) {
+  metrics <- list()
+  for (method in methods) {
+    metrics[[method$name]] = method$fun(Lys.train, Lts.train, y.train, Lys.test, Lts.test, y.test)
+  }
+  return(metrics)
+}
+
+methods = list(list(fun=method.fgcca, name="FGCCA"), list(fun=method.fpca, name="FPCA"))
+```
+
+```{r}
+library(caret)
+Lys[[4]] <- t(t(as.numeric(Lys[[4]] > median(Lys[[4]]))))
+
+simulate = function() {
+  id.train <- createDataPartition(Lys[[4]], p=0.6)[[1]]
+  id.test <- seq_len(length(Lys[[3]]))[-id.train]
+  
+  Lys.train <- list(Lys[[1]][id.train],Lys[[2]][id.train],Lys[[3]][id.train],Lys[[4]][id.train,,drop=F])
+  Lts.train <- list(Lts[[1]][id.train],Lts[[2]][id.train],Lts[[3]][id.train],NULL)
+  y.train <- Lys[[4]][id.train,,drop=F]
+  maxs <- sapply(seq(3), function(j){max(unlist(Lts.train[[j]]))})
+  mins <- sapply(seq(3), function(j){min(unlist(Lts.train[[j]]))})
+  
+  Lys.test <- list(Lys[[1]][id.test],Lys[[2]][id.test],Lys[[3]][id.test],Lys[[4]][id.test,,drop=F])
+  Lts.test <- list(Lts[[1]][id.test],Lts[[2]][id.test],Lts[[3]][id.test],NULL)
+  y.test <- Lys[[4]][id.test,,drop=F]
+  Lys.test[1:3] <- lapply(seq(3), function(j){lapply(seq(length(Lys.test[[3]])), function(i){Lys.test[[j]][[i]][Lts.test[[j]][[i]] <= maxs[j] & Lts.test[[j]][[i]] >= mins[j]]})})
+  Lts.test[1:3] <- lapply(seq(3), function(j){lapply(seq(length(Lys.test[[3]])), function(i){Lts.test[[j]][[i]][Lts.test[[j]][[i]] <= maxs[j] & Lts.test[[j]][[i]] >= mins[j]]})})
+  
+  res <- compare(Lys.train, Lts.train, y.train, Lys.test, Lts.test, y.test, methods)
+  return(res)
+}
+```
+
+```{r}
+N.SIM <- 100
+multi.res <- pbmcapply::pbmclapply(seq_len(N.SIM), function(j){simulate()}, mc.cores = 4)
+```
+
+```{r}
+df <- data.frame(sim=seq_len(N.SIM), 
+                 FGCCA=sapply(multi.res, function(r){r$FGCCA}), 
+                 FPCA=sapply(multi.res, function(r){r$FPCA}))
+df.plot <- df %>% pivot_longer("FGCCA":"FPCA", names_to = "Method", values_to = "Balanced Accuracy")
+```
+
+```{r}
+library(ggpubr)
+gg.box <- ggplot(df.plot, aes(y=`Balanced Accuracy`, fill=Method, x="a")) + 
+  geom_boxplot() + 
+  theme_bw(base_size = 8) + 
+  theme(legend.position = "top", panel.grid.major = element_blank(), axis.title.x = element_blank(), axis.ticks.x = element_blank(), axis.text.x = element_blank()) +
+  stat_compare_means(aes(group=Method), label="p.format", method="wilcox.test", paired=F, step.increase = 0, vjust=1.1, size=3) + stat_compare_means(aes(group=Method), label="p.signif", method="wilcox.test", paired=F, step.increase = 0, vjust=0.1, hide.ns = T) + 
+  scale_fill_grey(start = 0.4, end=0.8)
+```
+
+```{r}
+markers <- c("log(bilirubin)", "albumin", "prothrombin")
+
+df.fgcca <- df.fpca <- list()
+for (j in seq_len(J)) {
+  df.fgcca[[j]] <- data.frame(y=drop(sign(cor(fgcca.model$Y[[j]][,1], y.train))) * fgcca.model$a[[j]][,1], t=fgcca.model$grids[[j]], method="FGCCA", marker=markers[j])
+  df.fpca[[j]] <- data.frame(y=drop(sign(cor(fpca.model[[j]]$xiEst[,1], y.train))) * fpca.model[[j]]$phi[,1], t=fpca.model[[j]]$workGrid, method="FPCA", marker=markers[j])
+}
+
+df.phi <- rbind(do.call(rbind, df.fgcca), do.call(rbind, df.fpca))
+gg.list <- ggplot(df.phi, aes(x=t, y=y, group=method, color=method)) + geom_line() + theme_bw(base_size = 8) + theme(legend.position="top") + labs(y="First functional mode", x="Number of years since enrollment") + scale_color_grey(start=0.4, end=0.8, name="Method") + facet_wrap(.~marker, scales="free") + geom_abline(slope=0, intercept=0, linetype='dashed')
+
+ggarrange(gg.list, gg.box, ncol=2, common.legend = T, widths=c(3, 1))
+```

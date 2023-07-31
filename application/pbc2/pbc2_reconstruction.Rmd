@@ -1,0 +1,326 @@
+--- 
+title: "Characterization with FGCCA" 
+output: html_document
+--- 
+
+  ### FGCCA : a use case
+  
+  We propose to apply FGCCA to a biological dataset containing sparse and irregular functional data. The dataset contains various biological measurements made on 312 subjects diagnosed with Primary Biliary Cirrhosis, a rare autoimmune disease. We propose to analyse only female individuals who received D-penicillamine during the first 2500 days. 
+
+``` {r}
+library(JM)
+
+outliers <- c(42, 150, 153, 106, 93, 130)
+# Extracting data pbc2 from the JM package
+cols <- c("id", "years", "year", "status", "albumin", "serBilir", "prothrombin", "age", "sex", "drug")
+data <- subset(pbc2, status %in% c("dead", "alive") & !(id %in% outliers), cols)
+```
+
+We first perform normalization on the various measurements of interest. We considered 3 bio markers : Albumin, Bilirubin and Prothrombin time.
+
+```{r}
+library(dplyr)
+
+data <- data %>% mutate(id,
+                        time=years,
+                        "bilirubin"=log(serBilir), 
+                        "albumin"=albumin, 
+                        "prothrombin"=prothrombin, 
+                        .keep="unused")
+
+data <- data %>% dplyr::filter(year < 10)
+```
+
+We first visualize the observations with the first 10 trajectories.
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+names <- c("bilirubin", "albumin", "prothrombin")
+
+data.lf <- data %>% pivot_longer(cols=names)
+data.lf.first <- data.lf[data.lf$id %in% unique(data.lf$id)[1:5],]
+# Plotting observation points and the first 10 trajectories
+ggplot(data.lf, aes(x=year, y=value, group=id)) + geom_line(size=0.1) + geom_point(size=0.4) + facet_wrap(name~.,scale="free") + theme_bw(base_size = 8) + xlab("Number of years since enrollment") + theme(axis.title.y = element_blank() , axis.text.y = element_blank(), axis.ticks.y = element_blank(), strip.text.x = element_text(size=10))
+```
+
+```{r, echo=FALSE}
+# names <- c("bilirubin", "albumin", "prothrombin")
+
+data.list <- data %>% group_by(id, drug) %>% mutate(Ly1=list(bilirubin),
+                                                    Ly2=list(albumin),
+                                                    Ly3=list(prothrombin),
+                                                    Lt=list(year), .keep="unused") %>% dplyr::filter(length(Lt) > 3) %>% dplyr::filter( row_number(id)==1) %>% ungroup()
+
+```
+
+To apply FGCCA we must prepare the data. We also specify the various parameters of the analysis. We consider here a complete design, meaning that we will study the relationships for each process between all the others. We use bandwidths of 400 days.
+
+```{r}
+M <- 6
+J <- 3
+gridSizes <- c(50, 50, 50)
+
+FPCAoptns <- list(list(nRegGrid=gridSizes[1]), 
+                  list(nRegGrid=gridSizes[2]), 
+                  list(nRegGrid=gridSizes[3]))
+
+# Formatting the data
+Lts <- list(data.list$Lt,  data.list$Lt,  data.list$Lt)
+Lys <- list(data.list$Ly1, data.list$Ly2, data.list$Ly3)
+
+C <- 1 - diag(J)
+C_scores <- ones(3)
+
+# Specifying manually the bandwidths
+grids <- lapply(seq_len(J), function(j){seq(0, max(data$year), length.out=gridSizes[j])})
+```
+
+```{r}
+library(fdapace)
+library(FGCCA)
+
+method.fpca = function(Lys.train, Lts.train, Lys.tests, Lts.tests, y.missing, t.missing, j.missing, Lys.test.complete, Lts.test.complete) {
+  N <- length(Lys.tests[[1]][[1]])
+  transform.model <- lapply(seq(J), function(j){FPCA(Lys.train[[j]], Lts.train[[j]], list(methodSelectK=M, nRegGrid=gridSizes[j]))})
+  mse <- lapply(seq_len(K), function(k){rep(0, J)})
+  for (k in seq_len(K)) {
+    Lys.test <- Lys.tests[[k]]
+    Lts.test <- Lts.tests[[k]]
+    data.transformed <- lapply(seq(J), function(j){predict(transform.model[[j]], Lys.test[[j]], Lts.test[[j]])})
+    for (j in seq_len(J)) {
+      for (i in seq_len(N)) {
+        phi.i <- apply(transform.model[[j]]$phi, 2, function(s){interp1(grids[[j]], s, t.missing[[i]][j])})
+        mu.i <- interp1(grids[[j]], transform.model[[j]]$mu, t.missing[[i]][j])
+        mse[[k]][j] <- mse[[k]][j] + (1/N) * (y.missing[[i]][j] - (mu.i + crossprod(data.transformed[[j]]$scores[i,], phi.i)))**2
+      }
+    }
+  }
+  return(mse)
+}
+
+method.fgcca = function(Lys.train, Lts.train, Lys.tests, Lts.tests, y.missing, t.missing, Lys.test.complete, Lts.test.complete) {
+  N <- length(Lys.tests[[1]][[1]])
+  transform.model <- fgcca(Lys.train, Lts.train, ncomp=c(rep(M, J)), deflType = "ortho", verbose=F, connection = C,
+                           scale=T, optns = list(smoothing="lwls", scoreConnection=ones(J)))
+  mse <- lapply(seq_len(K), function(k){rep(0, J)})
+  for (k in seq_len(K)) {
+    for (j in seq_len(J)) {
+      Lys.test <- Lys.tests[[k]]
+      Lys.test[seq_len(J)[-j]] <- Lys.test.complete[seq_len(J)[-j]]
+      Lts.test <- Lts.tests[[k]]
+      Lts.test[seq_len(J)[-j]] <- Lts.test.complete[seq_len(J)[-j]]
+      Lys.test.transf <- Lys.test
+      Lys.test.transf <- lapply(seq_len(J), function(j){lapply(seq_len(N), function(i){
+        sqrt(transform.model$scaleValues[j]) * (Lys.test[[j]][[i]] - interp1(transform.model$grids[[j]], transform.model$mus[[j]], Lts.test[[j]][[i]]))
+      })})
+      data.transformed <- CompScoreCE(Lys.test.transf, Lts.test, transform.model$a, transform.model$sigmas, transform.model$grids,
+                                      transform.model$megaCov, transform.model$W, ones(J), transform.model$optns$useReg,transform.model$scaleValues)
+      for (i in seq_len(N)) {
+        phi.i <- apply(transform.model$a[[j]], 2, function(s){interp1(grids[[j]], s, t.missing[[i]][j])})
+        mu.i <- interp1(grids[[j]], transform.model$mus[[j]], t.missing[[i]][j])
+        mse[[k]][j] <- mse[[k]][j] + (1/N) * (y.missing[[i]][j] - (mu.i + crossprod(data.transformed[[j]][i,], phi.i)))**2
+      }
+    }
+  }
+  return(mse)
+}
+
+methods <- list(FPCA=method.fpca, FGCCA=method.fgcca)
+
+```
+
+```{r}
+library(caret)
+
+simulate = function() {
+  id.all <- seq_len(length(Lys[[1]]))
+  id.train <- createDataPartition(id.all, p=0.6)[[1]]
+  id.test <- id.all[-id.train]
+  n.train <- length(id.train)
+  n.test <- length(id.test)
+  
+  Lys.train <- list(Lys[[1]][id.train],Lys[[2]][id.train],Lys[[3]][id.train])
+  Lts.train <- list(Lts[[1]][id.train],Lts[[2]][id.train],Lts[[3]][id.train])
+  maxs <- sapply(seq(3), function(j){max(unlist(Lts.train[[j]]))})
+  mins <- sapply(seq(3), function(j){min(unlist(Lts.train[[j]]))})
+  Lys.test <- list(Lys[[1]][id.test],Lys[[2]][id.test],Lys[[3]][id.test])
+  Lts.test <- list(Lts[[1]][id.test],Lts[[2]][id.test],Lts[[3]][id.test])
+  for (j in seq_len(3)) {
+    Lys.test[[j]] <- lapply(seq_len(n.test), function(i){Lys.test[[j]][[i]][Lts.test[[j]][[i]] <= maxs[j] & Lts.test[[j]][[i]] >= mins[j]]})
+    Lts.test[[j]] <- lapply(seq_len(n.test), function(i){Lts.test[[j]][[i]][Lts.test[[j]][[i]] <= maxs[j] & Lts.test[[j]][[i]] >= mins[j]]}) 
+  }
+  
+  Lys.tests <- lapply(seq_len(K), function(j){Lys.test})
+  Lts.tests <- lapply(seq_len(K), function(j){Lts.test})
+  y.missing <- t.missing <- list()
+  for (i in seq_len(n.test)) {
+    y.missing[[i]] <- t.missing[[i]] <- rep(0, J)
+    for (j in seq_len(J)) {
+      n <- length(Lts.test[[j]][[i]])
+      y.missing[[i]][j] <- Lys.test[[j]][[i]][n]
+      t.missing[[i]][j] <- Lts.test[[j]][[i]][n]
+      for (k in seq_len(K)) {
+        Lys.tests[[k]][[j]][[i]] <- Lys.test[[j]][[i]][-((n-k+1):n)]
+        Lts.tests[[k]][[j]][[i]] <- Lts.test[[j]][[i]][-((n-k+1):n)]
+      }
+    }
+  }
+  
+  mse.methods <- list()
+  for (k in seq_len(length(methods))) {
+    mse.methods[[names(methods)[k]]] <- methods[[k]](Lys.train, Lts.train, Lys.tests, Lts.tests, y.missing, t.missing, Lys.test, Lts.test)
+  }
+  return(mse.methods)
+}
+```
+
+```{r}
+N.SIM <- 100
+K <- 3
+multi.res <- pbmcapply::pbmclapply(seq_len(N.SIM), function(j){simulate()}, mc.cores=4)
+```
+
+```{r}
+missing.names <- c("1M", "2M", "3M")
+names <- c("Bilirubin", "Albumin", "Prothrombin")
+df <- data.frame(sim=rep(seq_len(N.SIM), each=J*K), 
+                 FGCCA=unlist(lapply(multi.res, function(r){r$FGCCA})), 
+                 FPCA=unlist(lapply(multi.res, function(r){r$FPCA})),
+                 proc=rep(names, K*N.SIM),
+                 missing=rep(rep(missing.names, each=J), N.SIM))
+df.plot <- df %>% pivot_longer(2:3, names_to = c("Method"), values_to = "MSE")
+```
+
+```{r}
+library(ggpubr)
+library(ggh4x)
+gg.box <- ggplot(df.plot, aes(y=MSE, fill=Method, x="")) + 
+  geom_boxplot() + 
+  theme_bw(base_size = 8)  + 
+  scale_fill_grey(start = 0.4, end=0.8) +
+  # scale_x_discrete(position = "top") +
+  # xlab("Number of last observations removed") + 
+  facet_grid2(proc~missing, scale="free", independent = "x") +
+  theme(legend.position = "top", panel.grid.minor = element_blank(), axis.title.x = element_blank(), strip.background.x = element_blank(), axis.ticks.x = element_blank(), strip.text = element_text(size=10)) +
+ggpubr::stat_compare_means(aes(group=Method), label="p.signif", method="wilcox.test", paired=F, vjust = 2, hide.ns = T)
+  #ylim(0.2, 1.3)
+```
+
+```{r}
+plot.n <- 1
+
+id.all <- seq_len(length(Lys[[1]]))
+id.train <- createDataPartition(id.all, p=0.6)[[1]]
+id.test <- id.all[-id.train][seq_len(plot.n)]
+n.train <- length(id.train)
+n.test <- length(id.test)
+
+Lys.train <- list(Lys[[1]][id.train],Lys[[2]][id.train],Lys[[3]][id.train])
+Lts.train <- list(Lts[[1]][id.train],Lts[[2]][id.train],Lts[[3]][id.train])
+maxs <- sapply(seq(3), function(j){max(unlist(Lts.train[[j]]))})
+mins <- sapply(seq(3), function(j){min(unlist(Lts.train[[j]]))})
+
+Lys.test <- list(Lys[[1]][id.test],Lys[[2]][id.test],Lys[[3]][id.test])
+Lts.test <- list(Lts[[1]][id.test],Lts[[2]][id.test],Lts[[3]][id.test])
+for (j in seq_len(3)) {
+  Lys.test[[j]] <- lapply(seq_len(n.test), function(i){Lys.test[[j]][[i]][Lts.test[[j]][[i]] <= maxs[j] & Lts.test[[j]][[i]] >= mins[j]]})
+  Lts.test[[j]] <- lapply(seq_len(n.test), function(i){Lts.test[[j]][[i]][Lts.test[[j]][[i]] <= maxs[j] & Lts.test[[j]][[i]] >= mins[j]]}) 
+}
+
+Lys.tests <- lapply(seq_len(K), function(j){Lys.test})
+Lts.tests <- lapply(seq_len(K), function(j){Lts.test})
+y.missing <- t.missing <- list()
+  for (i in seq_len(n.test)) {
+    y.missing[[i]] <- t.missing[[i]] <- rep(0, J)
+    for (j in seq_len(J)) {
+      n <- length(Lts.test[[j]][[i]])
+      y.missing[[i]][j] <- Lys.test[[j]][[i]][n]
+      t.missing[[i]][j] <- Lts.test[[j]][[i]][n]
+      for (k in seq_len(K)) {
+        Lys.tests[[k]][[j]][[i]] <- Lys.test[[j]][[i]][-((n-k+1):n)]
+        Lts.tests[[k]][[j]][[i]] <- Lts.test[[j]][[i]][-((n-k+1):n)]
+      }
+    }
+  }
+ids <- unlist(lapply(seq(K), function(k){lapply(seq(J), function(j){lapply(seq(plot.n), function(i){rep(i, length(Lys.tests[[k]][[j]][[i]]))})})}))
+kms <- unlist(lapply(seq(K), function(k){lapply(seq(J), function(j){lapply(seq(plot.n), function(i){rep(missing.names[k], length(Lys.tests[[k]][[j]][[i]]))})})}))
+pro <- unlist(lapply(seq(K), function(k){lapply(seq(J), function(j){lapply(seq(plot.n), function(i){rep(names[j], length(Lys.tests[[k]][[j]][[i]]))})})}))
+
+df.true <- data.frame(id=ids, missing=kms, biomarker=pro, y=unlist(Lys.tests), t=unlist(Lts.tests))
+df.miss <- data.frame(id=rep(seq_len(plot.n), J*K), missing=rep(missing.names, each=plot.n*J), biomarker=rep(names, K), t=rep(unlist(t.missing), K), y=rep(unlist(y.missing), K))
+
+transform.model <- fgcca(Lys.train, Lts.train, ncomp=c(rep(M, J)), deflType = "ortho", verbose=F, connection = C,
+                         scale=T, optns = list(smoothing="lwls", scoreConnection=ones(J)))
+
+data.fgcca <- lapply(seq_len(K), function(k){lapply(seq_len(J), function(k){list()})})
+for (k in seq_len(K)) {
+  for (j in seq_len(J)) {
+    Lys.test.t <- Lys.tests[[k]]
+    Lys.test.t[seq_len(J)[-j]] <- Lys.test[seq_len(J)[-j]]
+    Lts.test.t <- Lts.tests[[k]]
+    Lts.test.t[seq_len(J)[-j]] <- Lts.test[seq_len(J)[-j]]
+    Lys.test.transf <- Lys.test.t
+    Lys.test.transf <- lapply(seq_len(J), function(j){lapply(seq_len(plot.n), function(i){
+      sqrt(transform.model$scaleValues[j]) * (Lys.test.t[[j]][[i]] - interp1(transform.model$grids[[j]], transform.model$mus[[j]], Lts.test.t[[j]][[i]]))
+    })})
+    data.transformed <- CompScoreCE(Lys.test.transf, Lts.test.t, transform.model$a, transform.model$sigmas, transform.model$grids,
+                                    transform.model$megaCov, transform.model$W, ones(J), transform.model$optns$useReg,transform.model$scaleValues)
+    for (i in seq_len(plot.n)) {
+      phi.i <- transform.model$a[[j]]
+      mu.i <- transform.model$mus[[j]]
+      data.fgcca[[k]][[j]][[i]] <- c(mu.i + data.transformed[[j]][i,] %*% t(phi.i))
+    }
+  }
+}
+
+ids <- unlist(lapply(seq(K), function(k){lapply(seq(J), function(j){lapply(seq(plot.n), function(i){rep(i, length(data.fgcca[[k]][[j]][[i]]))})})}))
+kms <- unlist(lapply(seq(K), function(k){lapply(seq(J), function(j){lapply(seq(plot.n), function(i){rep(missing.names[k], length(data.fgcca[[k]][[j]][[i]]))})})}))
+jms <- unlist(lapply(seq(K), function(k){lapply(seq(J), function(j){lapply(seq(plot.n), function(i){rep(names[j], length(data.fgcca[[k]][[j]][[i]]))})})}))
+
+df.fgcca <- data.frame(id=ids, missing=kms, biomarker=jms, y=unlist(data.fgcca), t=rep(grids[[1]], n.test*K*J), Method="FGCCA")
+
+transform.model <- lapply(seq(J), function(j){FPCA(Lys.train[[j]], Lts.train[[j]], list(methodSelectK=M, nRegGrid=gridSizes[j]))})
+data.fpca <- lapply(seq_len(K), function(k){lapply(seq_len(J), function(k){list()})})
+for (k in seq_len(K)) {
+    Lys.test <- Lys.tests[[k]]
+    Lts.test <- Lts.tests[[k]]
+    data.transformed <- lapply(seq(J), function(j){predict(transform.model[[j]], Lys.test[[j]], Lts.test[[j]])})
+    for (j in seq_len(J)) {
+      for (i in seq_len(plot.n)) {
+        phi.i <- transform.model[[j]]$phi
+        mu.i <- transform.model[[j]]$mu
+        data.fpca[[k]][[j]][[i]] <- c(mu.i + data.transformed[[j]]$scores[i,] %*% t(phi.i))
+      }
+    }
+  }
+
+ids <- unlist(lapply(seq(K), function(k){lapply(seq(J), function(j){lapply(seq(plot.n), function(i){rep(i, length(data.fpca[[k]][[j]][[i]]))})})}))
+kms <- unlist(lapply(seq(K), function(k){lapply(seq(J), function(j){lapply(seq(plot.n), function(i){rep(missing.names[k], length(data.fpca[[k]][[j]][[i]]))})})}))
+jms <- unlist(lapply(seq(K), function(k){lapply(seq(J), function(j){lapply(seq(plot.n), function(i){rep(names[j], length(data.fpca[[k]][[j]][[i]]))})})}))
+
+df.fgcca <- data.frame(id=ids, missing=kms, biomarker=jms, y=unlist(data.fgcca), t=rep(unlist(grids), plot.n*K), Method="FGCCA")
+df.fpca  <- data.frame(id=ids, missing=kms, biomarker=jms, y=unlist(data.fpca),  t=rep(unlist(grids), plot.n*K), Method="FPCA")
+
+df.rec <- rbind(df.fgcca, df.fpca)
+
+ggSub <- ggplot(df.true, aes(x=t, y=y, group=id)) + 
+  geom_point(shape="+", size=4) + 
+  facet_grid2(biomarker~missing, scales="free", independent="all") + 
+  theme_bw(base_size = 8) + 
+  # xlab("Number of years since enrollment") +
+  xlab("") +
+  ylab("Biomarker values") +
+  geom_point(data=df.miss, shape=1, size=2) +
+  geom_line(data=df.rec, aes(color=Method, group=Method)) + 
+  theme(legend.position = "top", strip.background.x = element_blank(), axis.title.x = element_blank(), strip.text = element_text(size=10)) +
+  scale_color_grey(start = 0.4, end=0.8)
+  # scale_color_manual(aesthetics = "fill")
+```
+
+```{r}
+library(gridExtra)
+
+ggarrange(ggSub, gg.box, widths=c(2,1), common.legend = T)
+```

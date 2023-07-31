@@ -1,0 +1,345 @@
+--- 
+title: "Characterization with FGCCA" 
+output: html_document
+--- 
+  
+### FGCCA : a use case
+  
+We propose to apply FGCCA to a biological dataset containing sparse and irregular functional data. The dataset contains various biological measurements made on 312 subjects diagnosed with Primary Biliary Cirrhosis, a rare autoimmune disease. We propose to analyse only female individuals who received D-penicillamine during the first 2500 days. 
+
+``` {r}
+library(JM)
+
+outliers <- c(42)
+# Extracting data pbc2 from the JM package
+cols <- c("id", "years", "year", "status", "albumin", "serBilir", "prothrombin", "age", "sex", "drug")
+data <- subset(pbc2, !(id %in% outliers) & (status %in% c("dead", "alive")), cols)
+levels(data$status) <- c("alive", NA, "dead")
+```
+
+We first perform normalization on the various measurements of interest. We considered 3 bio markers : Albumin, Bilirubin and Prothrombin time.
+
+```{r}
+library(dplyr)
+
+data <- data %>% mutate(id,
+                        time=years,
+                        "bilirubin"=log(serBilir), 
+                        "albumin"=albumin, 
+                        "prothrombin"=prothrombin, 
+                        .keep="unused")
+
+data <- data %>% dplyr::filter(year < 10)
+```
+
+We first visualize the observations with the first 10 trajectories.
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+th <- theme(panel.grid.major = element_blank(), 
+            panel.grid.minor = element_blank(),
+            # axis.title.x = element_blank(),
+            # axis.title.y = element_blank(),
+            # axis.text.x = element_blank(),
+            # axis.text.y = element_blank(),
+            # axis.ticks.y = element_blank(),
+            strip.background = element_blank())
+
+names <- list(
+  'bilirubin'="Bilirubin",
+  'albumin'="Albumin",
+  'prothrombin'="Prothrombin",
+  'year'="Year"
+)
+
+custom_labeller <- function(variable,value){
+  return(names[value])
+}
+
+data.lf <- data %>% pivot_longer(cols=c("bilirubin", "albumin", "prothrombin"))
+data.lf.first <- data.lf[data.lf$id %in% unique(data.lf$id)[1:5],]
+# Plotting observation points and the first 10 trajectories
+ggplot(data.lf, aes(x=year, y=value, group=id)) + geom_line(size=0.2) + facet_wrap(name~.,scales="free_y",labeller=custom_labeller) + theme_bw(base_size=14) + th + xlab("time (year)") + theme(strip.text.x = element_text(size=14,face="bold"))
+```
+
+```{r, echo=FALSE}
+names <- c("bilirubin", "albumin", "prothrombin")
+
+data.list <- data %>% group_by(id, drug) %>% mutate(Ly1=list(bilirubin),
+                                                    Ly2=list(albumin),
+                                                    Ly3=list(prothrombin),
+                                                    Lt=list(year), .keep="unused") %>% dplyr::filter(row_number(id)==1) %>% ungroup()
+
+```
+
+To apply FGCCA we must prepare the data. We also specify the various parameters of the analysis. We consider here a complete design, meaning that we will study the relationships for each process between all the others. We use bandwidths of 400 days.
+
+```{r}
+K <- 5
+J <- 3
+
+# Formatting the data
+Lts <- list(data.list$Lt, 
+            data.list$Lt, 
+            data.list$Lt)
+Lys <- list(data.list$Ly1, 
+            data.list$Ly2, 
+            data.list$Ly3)
+```
+
+```{r}
+library(FGCCA)
+library(pracma)
+library(fdapace)
+
+fgcca.fit <- fgcca(Lys, Lts, connection=1-eye(3), verbose=T, ncomp=c(rep(K, 3)), deflType="uncor", 
+                   scale=T, optns=list(smoothing="lwls", scoreConnection=ones(3)), tau=rep(0.1, 3))
+fpcas.fit <- lapply(seq_len(J),function(j){fpca <- FPCA(Lys[[j]], Lts[[j]], optns=list(methodSelectK=K))})
+```
+
+```{r}
+plot(fgcca.fit$Y[[1]][,1], fpcas.fit[[1]]$xiEst[,1])
+plot(fgcca.fit$Y[[2]][,1], fpcas.fit[[2]]$xiEst[,1])
+plot(fgcca.fit$Y[[3]][,1], fpcas.fit[[3]]$xiEst[,1])
+
+plot(fgcca.fit$Y[[1]][,2], fpcas.fit[[1]]$xiEst[,2])
+plot(fgcca.fit$Y[[2]][,2], fpcas.fit[[2]]$xiEst[,2])
+plot(fgcca.fit$Y[[3]][,2], fpcas.fit[[3]]$xiEst[,2])
+```
+
+```{r}
+fgcca.fit$a[[1]][,1] %*% fgcca.fit$W[[1]] %*% fgcca.fit$deflMegaCov[[1]][[1]][[1]] %*% fgcca.fit$W[[1]] %*% fgcca.fit$a[[1]][,1] 
+fgcca.fit$a[[2]][,1] %*% fgcca.fit$W[[2]] %*% fgcca.fit$deflMegaCov[[1]][[2]][[2]] %*% fgcca.fit$W[[2]] %*% fgcca.fit$a[[2]][,1] 
+fgcca.fit$a[[3]][,1] %*% fgcca.fit$W[[3]] %*% fgcca.fit$deflMegaCov[[1]][[3]][[3]] %*% fgcca.fit$W[[3]] %*% fgcca.fit$a[[3]][,1] 
+```
+
+```{r}
+fgcca.fit$a[[1]][,1] %*% fgcca.fit$W[[1]] %*% fgcca.fit$deflMegaCov[[1]][[1]][[2]] %*% fgcca.fit$W[[2]] %*% fgcca.fit$a[[2]][,1] / sqrt(fgcca.fit$a[[1]][,1] %*% fgcca.fit$W[[1]] %*% fgcca.fit$deflMegaCov[[1]][[1]][[1]] %*% fgcca.fit$W[[1]] %*% fgcca.fit$a[[1]][,1] * fgcca.fit$a[[2]][,1] %*% fgcca.fit$W[[2]] %*% fgcca.fit$deflMegaCov[[1]][[2]][[2]] %*% fgcca.fit$W[[2]] %*% fgcca.fit$a[[2]][,1])
+
+fgcca.fit$a[[1]][,1] %*% fgcca.fit$W[[1]] %*% fgcca.fit$deflMegaCov[[1]][[1]][[3]] %*% fgcca.fit$W[[3]] %*% fgcca.fit$a[[3]][,1] / sqrt(fgcca.fit$a[[1]][,1] %*% fgcca.fit$W[[1]] %*% fgcca.fit$deflMegaCov[[1]][[1]][[1]] %*% fgcca.fit$W[[1]] %*% fgcca.fit$a[[1]][,1] * fgcca.fit$a[[3]][,1] %*% fgcca.fit$W[[3]] %*% fgcca.fit$deflMegaCov[[1]][[3]][[3]] %*% fgcca.fit$W[[3]] %*% fgcca.fit$a[[3]][,1])
+
+fgcca.fit$a[[2]][,1] %*% fgcca.fit$W[[2]] %*% fgcca.fit$deflMegaCov[[1]][[2]][[3]] %*% fgcca.fit$W[[3]] %*% fgcca.fit$a[[3]][,1] / sqrt(fgcca.fit$a[[2]][,1] %*% fgcca.fit$W[[2]] %*% fgcca.fit$deflMegaCov[[1]][[2]][[2]] %*% fgcca.fit$W[[2]] %*% fgcca.fit$a[[2]][,1] * fgcca.fit$a[[3]][,1] %*% fgcca.fit$W[[3]] %*% fgcca.fit$deflMegaCov[[1]][[3]][[3]] %*% fgcca.fit$W[[3]] %*% fgcca.fit$a[[3]][,1])
+```
+
+```{r}
+fpcas.fit[[1]]$phi[,1] %*% fgcca.fit$W[[1]] %*% fgcca.fit$deflMegaCov[[1]][[1]][[2]] %*% fgcca.fit$W[[2]] %*% fpcas.fit[[2]]$phi[,1] / sqrt(fpcas.fit[[1]]$phi[,1] %*% fgcca.fit$W[[1]] %*% fgcca.fit$deflMegaCov[[1]][[1]][[1]] %*% fgcca.fit$W[[1]] %*% fpcas.fit[[1]]$phi[,1] * fpcas.fit[[2]]$phi[,1] %*% fgcca.fit$W[[2]] %*% fgcca.fit$deflMegaCov[[1]][[2]][[2]] %*% fgcca.fit$W[[2]] %*% fpcas.fit[[2]]$phi[,1])
+
+fpcas.fit[[1]]$phi[,1] %*% fgcca.fit$W[[1]] %*% fgcca.fit$deflMegaCov[[1]][[1]][[3]] %*% fgcca.fit$W[[3]] %*% fpcas.fit[[3]]$phi[,1] / sqrt(fpcas.fit[[1]]$phi[,1] %*% fgcca.fit$W[[1]] %*% fgcca.fit$deflMegaCov[[1]][[1]][[1]] %*% fgcca.fit$W[[1]] %*% fpcas.fit[[1]]$phi[,1] * fpcas.fit[[3]]$phi[,1] %*% fgcca.fit$W[[3]] %*% fgcca.fit$deflMegaCov[[1]][[3]][[3]] %*% fgcca.fit$W[[3]] %*% fpcas.fit[[3]]$phi[,1])
+
+fpcas.fit[[2]]$phi[,1] %*% fgcca.fit$W[[2]] %*% fgcca.fit$deflMegaCov[[1]][[2]][[3]] %*% fgcca.fit$W[[3]] %*% fpcas.fit[[3]]$phi[,1] / sqrt(fpcas.fit[[2]]$phi[,1] %*% fgcca.fit$W[[2]] %*% fgcca.fit$deflMegaCov[[1]][[2]][[2]] %*% fgcca.fit$W[[2]] %*% fpcas.fit[[2]]$phi[,1] * fpcas.fit[[3]]$phi[,1] %*% fgcca.fit$W[[3]] %*% fgcca.fit$deflMegaCov[[1]][[3]][[3]] %*% fgcca.fit$W[[3]] %*% fpcas.fit[[3]]$phi[,1])
+```
+
+```{r}
+fpcas.fit[[1]]$xiEst <- sapply(1:K, function(k){if (fpcas.fit[[1]]$phi[,k] %*% fgcca.fit$a[[1]][,k] > 0) fpcas.fit[[1]]$xiEst[,k] else -fpcas.fit[[1]]$xiEst[,k]})
+fpcas.fit[[2]]$xiEst <- sapply(1:K, function(k){if (fpcas.fit[[2]]$phi[,k] %*% fgcca.fit$a[[2]][,k] > 0) fpcas.fit[[2]]$xiEst[,k] else -fpcas.fit[[2]]$xiEst[,k]})
+fpcas.fit[[3]]$xiEst <- sapply(1:K, function(k){if (fpcas.fit[[3]]$phi[,k] %*% fgcca.fit$a[[3]][,k] > 0) fpcas.fit[[3]]$xiEst[,k] else -fpcas.fit[[3]]$xiEst[,k]})
+
+fpcas.fit[[1]]$phi <- sapply(1:K, function(k){if (fpcas.fit[[1]]$phi[,k] %*% fgcca.fit$a[[1]][,k] > 0) fpcas.fit[[1]]$phi[,k] else -fpcas.fit[[1]]$phi[,k]})
+fpcas.fit[[2]]$phi <- sapply(1:K, function(k){if (fpcas.fit[[2]]$phi[,k] %*% fgcca.fit$a[[2]][,k] > 0) fpcas.fit[[2]]$phi[,k] else -fpcas.fit[[2]]$phi[,k]})
+fpcas.fit[[3]]$phi <- sapply(1:K, function(k){if (fpcas.fit[[3]]$phi[,k] %*% fgcca.fit$a[[3]][,k] > 0) fpcas.fit[[3]]$phi[,k] else -fpcas.fit[[3]]$phi[,k]})
+```
+
+```{r, output=FALSE}
+grids <- lapply(1:J, function(x){seq(0, max(data$year), length.out=51)})
+
+data.phi.fgcca <- data.frame(t=grids[[1]], Bilirubin=fgcca.fit$a[[1]], Albumin=fgcca.fit$a[[2]], Prothrombin=fgcca.fit$a[[3]], method="FGCCA") %>% pivot_longer(2:(1+3*K), names_to = c("proc", "Mode"), names_pattern = "(.+).(.)")
+data.phi.fpcas <- data.frame(t=grids[[1]], Bilirubin=fpcas.fit[[1]]$phi, Albumin=fpcas.fit[[2]]$phi, Prothrombin=fpcas.fit[[3]]$phi, method="FPCA") %>% pivot_longer(2:(1+3*K), names_to = c("proc", "Mode"), names_pattern = "(.+).(.)")
+data.phi <- rbind(data.phi.fgcca, data.phi.fpcas)
+
+gg.phi <- ggplot(data.phi %>% filter(method == "FGCCA"), aes(x=t, y=value, group=Mode)) + 
+    geom_line(aes(linetype=Mode)) + facet_grid2(method~proc, scales="free", independent = "all") + theme_bw(base_size=8) + 
+    xlab("Number of years since enrollment") + 
+    ylab("Canonical modes") + 
+    # theme(legend.position = 'none',legend.box.spacing = unit(-5, "pt")) + 
+    theme(strip.text.x = element_text(size=10), strip.text.y = element_text(size=10), legend.position = 'top', strip.background.y = element_blank())
+
+gg.phi <- ggplot(data.phi, aes(x=t, y=value, group=Mode)) + 
+    geom_line(aes(linetype=Mode)) + facet_grid2(method~proc, scales="free", independent = "all") + theme_bw(base_size=8) + 
+    xlab("Number of years since enrollment") + 
+    ylab("Canonical/Principal modes") + 
+    # theme(legend.position = 'none',legend.box.spacing = unit(-5, "pt")) + 
+    theme(strip.text.x = element_text(size=10), strip.text.y = element_text(size=10), legend.position = 'top', strip.background.y = element_blank())
+
+# gg.phi <- ggplot(rbind(data.phi.fgcca, data.phi.fpcas), aes(x=t, y=value, group=Mode)) + geom_line(aes(linetype=Mode)) + facet_grid(method~proc, scales="free") + theme_bw(base_size=14) + th + xlab("Time") + theme(legend.position = 'top',legend.box.spacing = unit(-5, "pt")) + theme(strip.text.x = element_text(size=14,face="bold"), panel.spacing = unit(4, "lines"), axis.title.y = element_blank(), strip.text.y = element_blank())
+```
+
+```{r, output=FALSE}
+df.scatter.fgcca <- data.frame(Bilirubin=fgcca.fit$Y[[1]], Albumin=fgcca.fit$Y[[2]], Prothrombin=fgcca.fit$Y[[3]], Status=data.list$status, time=data.list$time, id=data.list$id, method="FGCCA")
+df.scatter.fpcas <- data.frame(Bilirubin=fpcas.fit[[1]]$xiEst, Albumin=fpcas.fit[[2]]$xiEst, Prothrombin=fpcas.fit[[3]]$xiEst, Status=data.list$status, time=data.list$time, id=data.list$id, method="FPCA")
+
+df.scatter <- rbind(df.scatter.fgcca, df.scatter.fpcas) %>% 
+  pivot_longer("Bilirubin.1":"Prothrombin.3", names_to = c("marker", "component"), names_pattern = "(.*).(.)") %>% 
+  pivot_wider(names_from = "component", values_from = "value", names_prefix = "component")
+
+gg.comp <- ggplot(df.scatter %>% filter(method=="FGCCA"), aes(x = component1, y = component2, color=Status)) + geom_point(size=0.5) + stat_ellipse() + scale_color_grey(start = 0.1, end=0.6) + facet_grid2(method~marker, scales="free", independent = "all") + theme_bw(base_size = 8) + xlab("Component 1") + ylab("Component 2") + theme(strip.text.x = element_text(size=10), legend.position = 'top', strip.text.y = element_text(size=10), strip.background.y = element_blank())
+
+gg.comp <- ggplot(df.scatter, aes(x = component1, y = component2, color=Status)) + geom_point(size=0.5) + stat_ellipse() + scale_color_grey(start = 0.1, end=0.6) + facet_grid2(method~marker, scales="free", independent = "all") + theme_bw(base_size = 8) + xlab("Component 1") + ylab("Component 2") + theme(strip.text.x = element_text(size=10), legend.position = 'top', strip.text.y = element_text(size=10), strip.background.y = element_blank())
+```
+
+```{r}
+gg1.2 <- ggplot(df.scatter.fgcca, aes(x=bilirubin.1, y=bilirubin.2, color=Status)) + geom_point() + stat_ellipse() + theme_bw(base_size = 14) + th + theme(plot.title = element_text(hjust = 0.5)) + xlab("Component 1") + ylab("Component 2") + scale_shape_manual(values=c(1, 4))  + theme(plot.title = element_text(size=14,face="bold")) + scale_color_grey(start = 0.1, end=0.6)
+gg1.1 <- ggplot(df.scatter.fgcca, aes(x=albumin.1, y=albumin.2, color=Status)) + geom_point() + stat_ellipse() + theme_bw(base_size = 14) + th + theme(plot.title = element_text(hjust = 0.5)) + xlab("Component 1") + ylab("Component 2") + scale_shape_manual(values=c(1, 4)) + theme(plot.title = element_text(size=14,face="bold")) + scale_color_grey(start = 0.1, end=0.6)
+gg1.3 <- ggplot(df.scatter.fgcca, aes(x=prothrombin.1, y=prothrombin.2, color=Status)) + geom_point() + stat_ellipse() + theme_bw(base_size = 14) + th + theme(plot.title = element_text(hjust = 0.5)) + xlab("Component 1") + ylab("Component 2") + scale_shape_manual(values=c(1, 4)) + theme(plot.title = element_text(size=14,face="bold")) + scale_color_grey(start = 0.1, end=0.6)
+
+gg2.1 <- ggplot(df.scatter.fpcas, aes(x=bilirubin.1, y=bilirubin.2, color=Status)) + geom_point() + stat_ellipse() + theme_bw(base_size = 14) + th + theme() + xlab("Component 1") + ylab("Component 2") + scale_shape_manual(values=c(1, 4)) + theme(plot.title = element_text(size=14,face="bold")) + scale_color_grey(start = 0.1, end=0.6)
+gg2.2 <- ggplot(df.scatter.fpcas, aes(x=albumin.1, y=albumin.2, color=Status)) + geom_point() + stat_ellipse() + theme_bw(base_size = 14) + th + theme() + xlab("Component 1") + ylab("Component 2") + scale_shape_manual(values=c(1, 4)) + theme(plot.title = element_text(size=14,face="bold")) + scale_color_grey(start = 0.1, end=0.6)
+gg2.3 <- ggplot(df.scatter.fpcas, aes(x=prothrombin.1, y=prothrombin.2, color=Status)) + geom_point() + stat_ellipse() + theme_bw(base_size = 14) + th + theme() + xlab("Component 1") + ylab("Component 2") + scale_shape_manual(values=c(1, 4)) + theme(plot.title = element_text(size=14,face="bold")) + scale_color_grey(start = 0.1, end=0.6)
+
+gg.comp <- ggpubr::ggarrange(gg1.1, gg1.2, gg1.3, gg2.1, gg2.2, gg2.3, ncol=3, nrow=2, common.legend = TRUE)
+# gridExtra::grid.arrange(gridExtra::arrangeGrob(gg1.1, gg1.2, gg1.3, ncol=3, right="FGCCA"), gridExtra::arrangeGrob(gg2.1, gg2.2, gg2.3, ncol=3, right="FPCA"), common.legend = TRUE)
+
+grid.arrange(gg.phi, gg.comp, ncol=1)
+```
+
+```{r,fig.width=15, fig.height=10}
+gg1.2 <- ggplot(df.scatter.fgcca, aes(x=bilirubin.1, y=bilirubin.2, shape=status)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + th + ggtitle("Bilirubin") + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + xlab("Component 1") + ylab("Component 2") + scale_shape_manual(values=c(0,3)) 
+gg1.1 <- ggplot(df.scatter.fgcca, aes(x=albumin.1, y=albumin.2, shape=status)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + th + ggtitle("Albumin") + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + xlab("Component 1") + ylab("Component 2")
+gg1.3 <- ggplot(df.scatter.fgcca, aes(x=prothrombin.1, y=prothrombin.2, shape=status)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + th + ggtitle("Prothrombin") + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + xlab("Component 1") + ylab("Component 2")
+
+gg2.1 <- ggplot(df.scatter.fpcas, aes(x=bilirubin.1, y=bilirubin.2, shape=status)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + th + theme(legend.position = "none") + xlab("Component 1") + ylab("Component 2")
+gg2.2 <- ggplot(df.scatter.fpcas, aes(x=albumin.1, y=albumin.2, shape=status)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + th + theme(legend.position = "none") + xlab("Component 1") + ylab("Component 2")
+gg2.3 <- ggplot(df.scatter.fpcas, aes(x=prothrombin.1, y=prothrombin.2, shape=status)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + th + theme(legend.position = "none") + xlab("Component 1") + ylab("Component 2")
+
+gridExtra::grid.arrange(gridExtra::arrangeGrob(gg1.1, gg1.2, gg1.3, ncol=3, right="FGCCA"), gridExtra::arrangeGrob(gg2.1, gg2.2, gg2.3, ncol=3, right="FPCA"))
+```
+
+```{r}
+fgcca.fit <- fgcca(Lys, Lts, verbose=T, ncomp=c(rep(K, 3)), deflType="ortho", 
+                   scale=T, optns=list(smoothing="lwls", scoreConnection=ones(3)))
+fpcas.fit <- lapply(seq_len(J),function(j){fpca <- FPCA(Lys[[j]], Lts[[j]], optns=list(methodSelectK=K))})
+```
+
+```{r}
+fpcas.fit[[1]]$xiEst <- sapply(1:K, function(k){if (fpcas.fit[[1]]$phi[,k] %*% fgcca.fit$a[[1]][,k] > 0) fpcas.fit[[1]]$xiEst[,k] else -fpcas.fit[[1]]$xiEst[,k]})
+fpcas.fit[[2]]$xiEst <- sapply(1:K, function(k){if (fpcas.fit[[2]]$phi[,k] %*% fgcca.fit$a[[2]][,k] > 0) fpcas.fit[[2]]$xiEst[,k] else -fpcas.fit[[2]]$xiEst[,k]})
+fpcas.fit[[3]]$xiEst <- sapply(1:K, function(k){if (fpcas.fit[[3]]$phi[,k] %*% fgcca.fit$a[[3]][,k] > 0) fpcas.fit[[3]]$xiEst[,k] else -fpcas.fit[[3]]$xiEst[,k]})
+
+fpcas.fit[[1]]$phi <- sapply(1:K, function(k){if (fpcas.fit[[1]]$phi[,k] %*% fgcca.fit$a[[1]][,k] > 0) fpcas.fit[[1]]$phi[,k] else -fpcas.fit[[1]]$phi[,k]})
+fpcas.fit[[2]]$phi <- sapply(1:K, function(k){if (fpcas.fit[[2]]$phi[,k] %*% fgcca.fit$a[[2]][,k] > 0) fpcas.fit[[2]]$phi[,k] else -fpcas.fit[[2]]$phi[,k]})
+fpcas.fit[[3]]$phi <- sapply(1:K, function(k){if (fpcas.fit[[3]]$phi[,k] %*% fgcca.fit$a[[3]][,k] > 0) fpcas.fit[[3]]$phi[,k] else -fpcas.fit[[3]]$phi[,k]})
+```
+
+```{r}
+grids <- lapply(1:J, function(x){seq(0, max(data$year), length.out=51)})
+
+data.phi.fgcca <- data.frame(t=grids[[1]], bilirubin=fgcca.fit$a[[1]], albumin=fgcca.fit$a[[2]], prothrombin=fgcca.fit$a[[3]], method="FGCCA") %>% pivot_longer(2:(1+3*K), names_to = c("proc", "k"), names_pattern = "(.+).(.)")
+data.phi.fpcas <- data.frame(t=grids[[1]], bilirubin=fpcas.fit[[1]]$phi, albumin=fpcas.fit[[2]]$phi, prothrombin=fpcas.fit[[3]]$phi, method="FPCA") %>% pivot_longer(2:(1+3*K), names_to = c("proc", "k"), names_pattern = "(.+).(.)")
+ggplot(rbind(data.phi.fgcca, data.phi.fpcas), aes(x=t, y=value, group=k)) + geom_line(aes(linetype=k)) + facet_grid(method~proc)
+```
+
+```{r, output=FALSE}
+df.scatter.fgcca <- data.frame(bilirubin=fgcca.fit$Y[[1]], albumin=fgcca.fit$Y[[2]], prothrombin=fgcca.fit$Y[[3]], status=data.list$status, time=data.list$time, id=data.list$id)
+df.scatter.fpcas <- data.frame(bilirubin=fpcas.fit[[1]]$xiEst, albumin=fpcas.fit[[2]]$xiEst, prothrombin=fpcas.fit[[3]]$xiEst, status=data.list$status, time=data.list$time, id=data.list$id)
+```
+
+```{r,fig.width=15, fig.height=10}
+gg1.1 <- ggplot(df.scatter.fgcca, aes(x=bilirubin.1, y=bilirubin.2, color=status, size=time)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + theme(legend.position = "none")
+gg1.2 <- ggplot(df.scatter.fgcca, aes(x=albumin.1, y=albumin.2, color=status, size=time)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + theme(legend.position = "none")
+gg1.3 <- ggplot(df.scatter.fgcca, aes(x=prothrombin.1, y=prothrombin.2, color=status, size=time)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + theme(legend.position = "none")
+
+gg2.1 <- ggplot(df.scatter.fpcas, aes(x=bilirubin.1, y=bilirubin.2, color=status, size=time)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + theme(legend.position = "none")
+gg2.2 <- ggplot(df.scatter.fpcas, aes(x=albumin.1, y=albumin.2, color=status, size=time)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + theme(legend.position = "none")
+gg2.3 <- ggplot(df.scatter.fpcas, aes(x=prothrombin.1, y=prothrombin.2, color=status, size=time)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + theme(legend.position = "none")
+
+gridExtra::grid.arrange(gg1.1, gg1.2, gg1.3, gg2.1, gg2.2, gg2.3, ncol=3)
+```
+
+```{r}
+Lts <- list(data.list$Lt, 
+            data.list$Lt, 
+            data.list$Lt,
+            NULL)
+Lys <- list(data.list$Ly1, 
+            data.list$Ly2, 
+            data.list$Ly3,
+            t(t(as.numeric(data.list$status == "dead"))))
+
+C <- zeros(4)
+C[1:3,4] <- C[4,1:3] <- 1
+C_scores <- eye(4)
+C_scores[1:3,1:3] <- 1
+```
+
+```{r}
+fgcca.fit <- fgcca(Lys, Lts, verbose=T, ncomp=c(rep(K, 3), 1), connection=C, deflType="uncor", 
+                   scale=T, optns=list(smoothing="gam", scoreConnection=C_scores))
+fpcas.fit <- lapply(seq_len(J),function(j){fpca <- FPCA(Lys[[j]], Lts[[j]], optns=list(methodSelectK=K))})
+
+cor(fgcca.fit$Y[[1]][,1], fgcca.fit$Y[[4]][,1])
+cor(fpcas.fit[[1]]$xiEst[,1], fgcca.fit$Y[[4]][,1])
+```
+
+```{r}
+fpcas.fit[[1]]$xiEst <- sapply(1:K, function(k){if (fpcas.fit[[1]]$phi[,k] %*% fgcca.fit$a[[1]][,k] > 0) fpcas.fit[[1]]$xiEst[,k] else -fpcas.fit[[1]]$xiEst[,k]})
+fpcas.fit[[2]]$xiEst <- sapply(1:K, function(k){if (fpcas.fit[[2]]$phi[,k] %*% fgcca.fit$a[[2]][,k] > 0) fpcas.fit[[2]]$xiEst[,k] else -fpcas.fit[[2]]$xiEst[,k]})
+fpcas.fit[[3]]$xiEst <- sapply(1:K, function(k){if (fpcas.fit[[3]]$phi[,k] %*% fgcca.fit$a[[3]][,k] > 0) fpcas.fit[[3]]$xiEst[,k] else -fpcas.fit[[3]]$xiEst[,k]})
+
+fpcas.fit[[1]]$phi <- sapply(1:K, function(k){if (fpcas.fit[[1]]$phi[,k] %*% fgcca.fit$a[[1]][,k] > 0) fpcas.fit[[1]]$phi[,k] else -fpcas.fit[[1]]$phi[,k]})
+fpcas.fit[[2]]$phi <- sapply(1:K, function(k){if (fpcas.fit[[2]]$phi[,k] %*% fgcca.fit$a[[2]][,k] > 0) fpcas.fit[[2]]$phi[,k] else -fpcas.fit[[2]]$phi[,k]})
+fpcas.fit[[3]]$phi <- sapply(1:K, function(k){if (fpcas.fit[[3]]$phi[,k] %*% fgcca.fit$a[[3]][,k] > 0) fpcas.fit[[3]]$phi[,k] else -fpcas.fit[[3]]$phi[,k]})
+```
+
+We now plot the canonical functions retrieved.
+
+```{r}
+grids <- lapply(1:J, function(x){seq(0, max(data$year), length.out=51)})
+
+data.phi.fgcca <- data.frame(t=grids[[1]], bilirubin=fgcca.fit$a[[1]], albumin=fgcca.fit$a[[2]], prothrombin=fgcca.fit$a[[3]], method="FGCCA") %>% pivot_longer(2:(1+3*K), names_to = c("proc", "k"), names_pattern = "(.+).(.)")
+data.phi.fpcas <- data.frame(t=grids[[1]], bilirubin=fpcas.fit[[1]]$phi, albumin=fpcas.fit[[2]]$phi, prothrombin=fpcas.fit[[3]]$phi, method="FPCA") %>% pivot_longer(2:(1+3*K), names_to = c("proc", "k"), names_pattern = "(.+).(.)")
+ggplot(rbind(data.phi.fgcca, data.phi.fpcas), aes(x=t, y=value, group=k)) + geom_line(aes(linetype=k)) + facet_grid(method~proc) + theme_bw()
+```
+
+```{r, output=FALSE}
+df.scatter.fgcca <- data.frame(Bilirubin=fgcca.fit$Y[[1]], Albumin=fgcca.fit$Y[[2]], Prothrombin=fgcca.fit$Y[[3]], Status=data.list$status, time=data.list$time, id=data.list$id, Method="FGCCA")
+df.scatter.fpcas <- data.frame(Bilirubin=fpcas.fit[[1]]$xiEst, Albumin=fpcas.fit[[2]]$xiEst, Prothrombin=fpcas.fit[[3]]$xiEst, Status=data.list$status, time=data.list$time, id=data.list$id, Method="FPCA")
+
+df.scatter <- rbind(df.scatter.fgcca, df.scatter.fpcas) %>% 
+  pivot_longer("Bilirubin.1":"Prothrombin.3", names_to = c("marker", "component"), names_pattern = "(.*).(.)") %>% 
+  pivot_wider(names_from = "component", values_from = "value", names_prefix = "component")
+
+ggcomp <- ggplot(df.scatter, aes(x="", y=component1, fill=Method)) + 
+  geom_violin() + 
+  facet_grid2(marker~Status, scales="free", independent = "x") + 
+  scale_fill_grey(start=0.4, end=0.8) +
+  theme_bw(base_size = 8) +
+  ylab("Component 1") +
+  theme(legend.position = "top", panel.grid.minor = element_blank(), strip.text = element_text(size=10), axis.title.x = element_blank(), strip.background.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank())
+```
+
+```{r,fig.width=15, fig.height=10}
+gg1.1 <- ggplot(df.scatter.fgcca, aes(x="0", y=bilirubin.1, fill=status)) + geom_violin(alpha=alpha) + theme_bw(base_size = 14) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + theme(plot.title = element_text(size=14,face="bold")) + scale_fill_grey(start = 0.4, end=0.8) + ylab("Component 1") + ggtitle("Bilirubin") + th + stat_compare_means(aes(group=status), label="p.signif", method="wilcox.test", paired=F, step.increase = 0, vjust=1, hide.ns = T) + scale_fill_grey(start = 0.4, end=0.8)
+gg1.2 <- ggplot(df.scatter.fgcca, aes(x="0", y=albumin.1, fill=status)) + geom_violin(alpha=alpha) + theme_bw(base_size = 14) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + theme(plot.title = element_text(size=14,face="bold")) + scale_fill_grey(start = 0.4, end=0.8) + ylab("Component 1") + ggtitle("Albumin") + th + stat_compare_means(aes(group=status), label="p.signif", method="wilcox.test", paired=F, step.increase = 0, vjust=1, hide.ns = T) + scale_fill_grey(start = 0.4, end=0.8)
+gg1.3 <- ggplot(df.scatter.fgcca, aes(x="0", y=prothrombin.1, fill=status)) + geom_violin(alpha=alpha) + theme_bw(base_size = 14) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + theme(plot.title = element_text(size=14,face="bold")) + scale_fill_grey(start = 0.4, end=0.8) + ylab("Component 1") + ggtitle("Prothrombin") + th + stat_compare_means(aes(group=status), label="p.signif", method="wilcox.test", paired=F, step.increase = 0, vjust=1, hide.ns = T) + scale_fill_grey(start = 0.4, end=0.8)
+
+gg2.1 <- ggplot(df.scatter.fpcas, aes(x="0", y=bilirubin.1, fill=status)) + geom_violin(alpha=alpha) + theme_bw(base_size = 14) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + theme(plot.title = element_text(size=14,face="bold")) + scale_fill_grey(start = 0.4, end=0.8) + ylab("Component 1") + th + stat_compare_means(aes(group=status), label="p.signif", method="wilcox.test", paired=F, step.increase = 0, vjust=1, hide.ns = T) + scale_fill_grey(start = 0.4, end=0.8)
+gg2.2 <- ggplot(df.scatter.fpcas, aes(x="0", y=albumin.1, fill=status)) + geom_violin(alpha=alpha) + theme_bw(base_size = 14) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + theme(plot.title = element_text(size=14,face="bold")) + scale_fill_grey(start = 0.4, end=0.8) + ylab("Component 1") + th  + stat_compare_means(aes(group=status), label="p.signif", method="wilcox.test", paired=F, step.increase = 0, vjust=1, hide.ns = T) + scale_fill_grey(start = 0.4, end=0.8)
+gg2.3 <- ggplot(df.scatter.fpcas, aes(x="0", y=prothrombin.1, fill=status)) + geom_violin(alpha=alpha) + theme_bw(base_size = 14) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + theme(plot.title = element_text(size=14,face="bold")) + scale_fill_grey(start = 0.4, end=0.8) + ylab("Component 1") + th + stat_compare_means(aes(group=status), label="p.signif", method="wilcox.test", paired=F, step.increase = 0, vjust=1, hide.ns = T) + scale_fill_grey(start = 0.4, end=0.8)
+
+gridExtra::grid.arrange(gridExtra::arrangeGrob(gg1.1, gg1.2, gg1.3, ncol=3, right="FGCCA"), gridExtra::arrangeGrob(gg2.1, gg2.2, gg2.3, ncol=3, right="FPCA"))
+```
+
+```{r,fig.width=15, fig.height=10}
+gg1.1 <- ggplot(df.scatter.fgcca, aes(x=bilirubin.1, fill=status)) + geom_density(alpha=alpha) + theme_bw(base_size = 14) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + theme(plot.title = element_text(size=14,face="bold")) + scale_fill_grey(start = 0.4, end=0.8) + xlab("Component 1") + ggtitle("Bilirubin") + th + xlim(range(density(df.scatter.fgcca$bilirubin.1)$x))
+gg1.2 <- ggplot(df.scatter.fgcca, aes(x=albumin.1, fill=status)) + geom_density(alpha=alpha) + theme_bw(base_size = 14) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + theme(plot.title = element_text(size=14,face="bold")) + scale_fill_grey(start = 0.4, end=0.8) + xlab("Component 1") + ggtitle("Albumin") + th + xlim(range(density(df.scatter.fgcca$albumin.1)$x))
+gg1.3 <- ggplot(df.scatter.fgcca, aes(x=prothrombin.1, fill=status)) + geom_density(alpha=alpha) + theme_bw(base_size = 14) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + theme(plot.title = element_text(size=14,face="bold")) + scale_fill_grey(start = 0.4, end=0.8) + xlab("Component 1") + ggtitle("Prothrombin") + th + xlim(range(density(df.scatter.fgcca$prothrombin.1)$x))
+
+gg2.1 <- ggplot(df.scatter.fpcas, aes(x=bilirubin.1, fill=status)) + geom_density(alpha=alpha) + theme_bw(base_size = 14) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + theme(plot.title = element_text(size=14,face="bold")) + scale_fill_grey(start = 0.4, end=0.8) + xlab("Component 1") + th + xlim(range(density(df.scatter.fpcas$bilirubin.1)$x))
+gg2.2 <- ggplot(df.scatter.fpcas, aes(x=albumin.1, fill=status)) + geom_density(alpha=alpha) + theme_bw(base_size = 14) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + theme(plot.title = element_text(size=14,face="bold")) + scale_fill_grey(start = 0.4, end=0.8) + xlab("Component 1") + th + xlim(range(density(df.scatter.fpcas$albumin.1)$x))
+gg2.3 <- ggplot(df.scatter.fpcas, aes(x=prothrombin.1, fill=status)) + geom_density(alpha=alpha) + theme_bw(base_size = 14) + theme(legend.position = "none", plot.title = element_text(hjust = 0.5)) + theme(plot.title = element_text(size=14,face="bold")) + scale_fill_grey(start = 0.4, end=0.8) + xlab("Component 1") + th + xlim(range(density(df.scatter.fpcas$prothrombin.1)$x))
+
+gridExtra::grid.arrange(gridExtra::arrangeGrob(gg1.1, gg1.2, gg1.3, ncol=3, right="FGCCA"), gridExtra::arrangeGrob(gg2.1, gg2.2, gg2.3, ncol=3, right="FPCA"))
+```
+
+```{r,fig.width=15, fig.height=10}
+gg1.1 <- ggplot(df.scatter.fgcca, aes(x=bilirubin.1, y=bilirubin.2, color=status, size=time)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + theme(legend.position = "none")
+gg1.2 <- ggplot(df.scatter.fgcca, aes(x=albumin.1, y=albumin.2, color=status, size=time)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + theme(legend.position = "none")
+gg1.3 <- ggplot(df.scatter.fgcca, aes(x=prothrombin.1, y=prothrombin.2, color=status, size=time)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + theme(legend.position = "none")
+
+gg2.1 <- ggplot(df.scatter.fpcas, aes(x=bilirubin.1, y=bilirubin.2, color=status, size=time)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + theme(legend.position = "none")
+gg2.2 <- ggplot(df.scatter.fpcas, aes(x=albumin.1, y=albumin.2, color=status, size=time)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + theme(legend.position = "none")
+gg2.3 <- ggplot(df.scatter.fpcas, aes(x=prothrombin.1, y=prothrombin.2, color=status, size=time)) + geom_point() + geom_rug(sides="tr", size=0.8) + stat_ellipse() + theme_bw() + theme(legend.position = "none")
+
+gridExtra::grid.arrange(gg1.1, gg1.2, gg1.3, gg2.1, gg2.2, gg2.3, ncol=3)
+```
